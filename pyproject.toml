@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wattxpense"
+version = "0.1.0"
+description = "WattXpense - smart home energy monitoring and electricity expense tracking"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+    "sqlalchemy>=2.0",
+    "pydantic>=2.6",
+    "numpy>=1.26",
+    "pandas>=2.1",
+    "scikit-learn>=1.4",
+    "httpx>=0.27",
+    "python-dateutil>=2.9",
+]
+
+[project.optional-dependencies]
+mqtt = ["paho-mqtt>=2.1"]
+dev = ["pytest>=8.0", "httpx>=0.27"]
+
+[project.scripts]
+wattxpense-seed = "simulator.cli:seed_main"
+wattxpense-simulate = "simulator.cli:simulate_main"
+
+[tool.setuptools]
+packages = [
+    "backend",
+    "backend.app",
+    "backend.app.ingestion",
+    "backend.app.ingestion.sources",
+    "backend.app.routers",
+    "backend.app.services",
+    "energy_ai",
+    "energy_ai.llm",
+    "simulator",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning"]
