@@ -16,8 +16,7 @@
     },
     "backend": {
       "root": "backend",
-      "framework": "fastapi",
-      "buildCommand": ".venv/bin/python -m pip install -e . && echo 'ready'"
+      "framework": "fastapi"
     }
   },
   "rewrites": [
