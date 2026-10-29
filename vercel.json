@@ -19,7 +19,7 @@
       "root": "backend",
       "framework": "fastapi",
       "buildCommand": ".venv/bin/python -m pip install -e . && echo 'ready'",
-      "startCommand": ".venv/bin/python -m uvicorn backend.app.main:app --host 0.0.0.0 --port $PORT"
+      "port": 8000
     }
   },
   "rewrites": [

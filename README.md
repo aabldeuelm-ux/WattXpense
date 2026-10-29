@@ -288,7 +288,15 @@ All settings are environment variables with working defaults.
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `WATTXPENSE_DATA_DIR` | `./data` | Where the SQLite database lives |
-| `WATTXPENSE_DATABASE_URL` | SQLite in the data dir | Overrides the database entirely |
+| `WATTXPENSE_DATABASE_URL` | SQLite in the data dir | Overrides the database entirely. **For production, set this to the Transaction
+pooler connection string obtained from the Supabase Dashboard → Connect page.** Do NOT
+use the "direct" connection string — the transaction pooler is required for serverless
+functions. Copy the exact string from the "Connection string" box on the Connect page.
+The .env file is git‑ignored; set this variable in Vercel’s server‑side environment
+variables panel (do not commit it to the repository). Leave unset for local SQLite
+development. When the variable is set, the app will connect to Supabase Postgres instead
+of SQLite. If the variable is missing and the app is not running with a local SQLite URL,
+it will fail at startup with a clear error message.
 | `WATTXPENSE_TIMEZONE` | `Asia/Kolkata` | Timezone used for day and billing-period boundaries |
 | `WATTXPENSE_SIMULATED_NOW` | unset | Pins the application clock, for demos and tests |
 | `WATTXPENSE_CURRENCY` | `INR` | Currency code shown in the UI |
