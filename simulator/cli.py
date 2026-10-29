@@ -12,11 +12,43 @@ from simulator.profiles import describe_simulator, default_profiles
 from simulator.simulator import build_plan, live_sample
 
 DEFAULT_URL = "http://127.0.0.1:8000"
+DEFAULT_EMAIL = "demo@wattxpense.local"
+DEFAULT_PASSWORD = "wattxpense-demo"
 BATCH_SIZE = 2000
 
 
 def _payload(sample: ReadingSample) -> dict:
     return sample.as_dict()
+
+
+def authenticate(client: httpx.Client, base_url: str, args: argparse.Namespace) -> None:
+    """Sign in the simulator, registering the demo account on first use.
+
+    The API only accepts readings for an authenticated account, so the simulator has to be
+    a real user rather than an unauthenticated writer. The CSRF token from the login
+    response is echoed on every state-changing request.
+    """
+    email = (getattr(args, "email", None) or DEFAULT_EMAIL).strip().lower()
+    password = getattr(args, "password", None) or DEFAULT_PASSWORD
+    body = {"email": email, "password": password}
+
+    response = client.post(f"{base_url}/api/auth/login", json=body, timeout=15.0)
+    if response.status_code == 401 and getattr(args, "register", True):
+        response = client.post(
+            f"{base_url}/api/auth/register",
+            json={**body, "display_name": "Simulated demo account"},
+            timeout=15.0,
+        )
+        if response.status_code == 409:
+            print(f"  account {email} exists but the password did not match.")
+            print("  Pass --password with the account password, or create a new account with --email.")
+    if response.status_code >= 400:
+        raise SystemExit(f"Could not sign in as {email}: {response.status_code} {response.text}")
+
+    csrf = response.json().get("csrf_token")
+    if csrf:
+        client.headers.update({"X-CSRF-Token": csrf})
+    print(f"  signed in as {email}")
 
 
 def post_samples(
@@ -79,26 +111,42 @@ def _seed_direct(samples: list[ReadingSample], plan, args: argparse.Namespace) -
 
     from backend.app.database import SessionLocal, init_db
     from backend.app.ingestion.service import ensure_device, persist_samples
-    from backend.app.models import Device
+    from backend.app.models import Device, User
 
     init_db()
     db = SessionLocal()
     try:
+        owner_id = None
+        email = (getattr(args, "email", None) or "").strip().lower()
+        if email:
+            user = db.execute(select(User).where(User.email == email)).scalars().first()
+            if user is None:
+                print(f"No account with email {email}. Register it in the dashboard first.")
+                return 1
+            owner_id = user.id
+
         for profile in plan.profiles:
             ensure_device(
                 db,
                 profile.device_id,
+                owner_id=owner_id,
                 source="simulator",
                 is_simulated=True,
                 name=profile.name,
                 location=profile.location,
+                nominal_voltage_v=profile.nominal_voltage_v,
+                nominal_interval_seconds=profile.interval_minutes * 60,
+                notes=profile.notes,
             )
         primary_ids = {p.device_id for p in plan.profiles if p.is_primary}
-        for device in db.execute(select(Device)).scalars():
-            device.is_primary = device.id in primary_ids
+        query = select(Device) if owner_id is None else select(Device).where(Device.owner_id == owner_id)
+        for device in db.execute(query).scalars():
+            if device.id in {p.device_id for p in plan.profiles}:
+                device.is_primary = device.id in primary_ids
         db.commit()
 
-        result = persist_samples(db, samples, source="simulator")
+        result = persist_samples(db, samples, source="simulator", owner_id=owner_id)
+        db.commit()
         print(f"  inserted {result.inserted}, updated {result.updated}, rejected {result.rejected}")
         for error in result.errors[:5]:
             print(f"  ! {error}")
@@ -120,13 +168,26 @@ def _seed_http(samples: list[ReadingSample], plan, args: argparse.Namespace, des
         return 1
 
     try:
+        authenticate(client, base_url, args)
+    except SystemExit as exc:
+        print(exc)
+        client.close()
+        return 1
+
+    try:
         if args.reset:
             for profile in plan.profiles:
-                client.delete(f"{base_url}/api/readings", params={"device_id": profile.device_id}, timeout=30.0)
+                response = client.delete(
+                    f"{base_url}/api/readings",
+                    params={"device_id": profile.device_id},
+                    timeout=30.0,
+                )
+                if response.status_code not in (200, 404):
+                    print(f"  could not clear {profile.device_id}: {response.status_code}")
             print("  cleared existing readings")
 
         for profile in plan.profiles:
-            client.post(
+            response = client.post(
                 f"{base_url}/api/devices",
                 json={
                     "id": profile.device_id,
@@ -136,10 +197,14 @@ def _seed_http(samples: list[ReadingSample], plan, args: argparse.Namespace, des
                     "is_simulated": True,
                     "is_primary": profile.is_primary,
                     "nominal_voltage_v": profile.nominal_voltage_v,
+                    "nominal_interval_seconds": profile.interval_minutes * 60,
+                    "sampling_interval_seconds": profile.interval_minutes * 60,
                     "notes": profile.notes,
                 },
                 timeout=15.0,
             )
+            if response.status_code >= 400:
+                print(f"  ! device {profile.device_id}: {response.status_code} {response.text[:200]}")
 
         totals = post_samples(client, base_url, samples, source="simulator", label="seeding")
         print(
@@ -161,6 +226,12 @@ def command_live(args: argparse.Namespace) -> int:
     print(f"WattXpense simulator - streaming live SIMULATED readings to {base_url} every {args.interval}s")
     print("Press Ctrl+C to stop.")
     client = httpx.Client()
+    try:
+        authenticate(client, base_url, args)
+    except SystemExit as exc:
+        print(exc)
+        client.close()
+        return 1
     tick = 0
     try:
         while True:
@@ -202,12 +273,32 @@ def build_parser() -> argparse.ArgumentParser:
     seed.add_argument("--no-gap", action="store_true", help="Do not inject the deliberate missing-data day.")
     seed.add_argument("--reset", action="store_true", help="Delete existing readings for the simulated devices first.")
     seed.add_argument("--direct", action="store_true", help="Write straight to the database instead of using HTTP.")
+    seed.add_argument(
+        "--email",
+        default=None,
+        help=f"Account to seed over HTTP (default {DEFAULT_EMAIL}). With --direct, omit to write unowned legacy rows.",
+    )
+    seed.add_argument("--password", default=DEFAULT_PASSWORD, help="Password for the seeding account.")
+    seed.add_argument(
+        "--no-register",
+        dest="register",
+        action="store_false",
+        help="Do not create the demo account if it does not exist.",
+    )
     seed.set_defaults(func=command_seed)
 
     live = sub.add_parser("live", help="Stream readings in real time through the ingestion API.")
     live.add_argument("--interval", type=int, default=10, help="Seconds between readings (default 10).")
     live.add_argument("--url", default=DEFAULT_URL, help=f"API base URL (default {DEFAULT_URL}).")
     live.add_argument("--device-id", default=None, help="Only stream one device.")
+    live.add_argument("--email", default=DEFAULT_EMAIL, help=f"Account to stream into (default {DEFAULT_EMAIL}).")
+    live.add_argument("--password", default=DEFAULT_PASSWORD, help="Password for the streaming account.")
+    live.add_argument(
+        "--no-register",
+        dest="register",
+        action="store_false",
+        help="Do not create the demo account if it does not exist.",
+    )
     live.set_defaults(func=command_live)
 
     return parser

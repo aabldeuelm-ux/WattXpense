@@ -32,6 +32,10 @@ from backend.app.timestamps import iso, utc_now
 SAME_VALUE_TOLERANCE = 1e-6
 
 
+class OwnershipError(PermissionError):
+    """A device belongs to someone else, or is an unclaimed legacy row."""
+
+
 @dataclass
 class IngestResult:
     received: int = 0
@@ -62,32 +66,65 @@ def ensure_device(
     db: Session,
     device_id: str,
     *,
+    owner_id: int | None = None,
     source: str | None = None,
     is_simulated: bool | None = None,
     name: str | None = None,
     location: str | None = None,
     is_primary: bool | None = None,
     nominal_voltage_v: float | None = None,
+    nominal_interval_seconds: int | None = None,
+    sampling_interval_seconds: int | None = None,
+    sensor_model: str | None = None,
+    calibration_json: str | None = None,
+    gpio_config_json: str | None = None,
+    firmware_version: str | None = None,
+    relay_enabled: bool | None = None,
     notes: str | None = None,
 ) -> Device:
-    """Fetch or create a device. The first device registered becomes the billed one."""
+    """Fetch or create a device, without ever taking over somebody else's row.
+
+    A legacy row (owner_id NULL) is not silently claimed by the first account that happens
+    to use its id. That is what the explicit `claim-legacy` command is for.
+    """
     device = db.get(Device, device_id)
     if device is None:
-        # A single insert per device per batch, not one per sample.
-        existing_primary = db.execute(select(Device).where(Device.is_primary.is_(True))).first()
+        # The first device *for this owner* becomes the billed one. A global primary would
+        # make one account's device the default for another.
+        if owner_id is None:
+            existing_primary = db.execute(
+                select(Device).where(Device.owner_id.is_(None), Device.is_primary.is_(True))
+            ).first()
+        else:
+            existing_primary = db.execute(
+                select(Device).where(Device.owner_id == owner_id, Device.is_primary.is_(True))
+            ).first()
         device = Device(
             id=device_id,
+            owner_id=owner_id,
             name=name,
             location=location,
             source=source,
             is_simulated=is_simulated,
             is_primary=bool(is_primary) if is_primary is not None else existing_primary is None,
             nominal_voltage_v=nominal_voltage_v,
+            nominal_interval_seconds=nominal_interval_seconds,
+            sampling_interval_seconds=sampling_interval_seconds,
+            sensor_model=sensor_model,
+            calibration_json=calibration_json,
+            gpio_config_json=gpio_config_json,
+            firmware_version=firmware_version,
+            relay_enabled=bool(relay_enabled) if relay_enabled is not None else False,
             notes=notes,
         )
         db.add(device)
         db.flush()
         return device
+
+    if owner_id is not None and device.owner_id != owner_id:
+        raise OwnershipError(f"Device '{device_id}' does not belong to this account")
+    if owner_id is None and device.owner_id is not None:
+        raise OwnershipError(f"Device '{device_id}' belongs to an account; owner_id is required")
 
     if name is not None:
         device.name = name
@@ -99,6 +136,20 @@ def ensure_device(
         device.is_simulated = is_simulated
     if nominal_voltage_v is not None:
         device.nominal_voltage_v = nominal_voltage_v
+    if nominal_interval_seconds is not None:
+        device.nominal_interval_seconds = nominal_interval_seconds
+    if sampling_interval_seconds is not None:
+        device.sampling_interval_seconds = sampling_interval_seconds
+    if sensor_model is not None:
+        device.sensor_model = sensor_model
+    if calibration_json is not None:
+        device.calibration_json = calibration_json
+    if gpio_config_json is not None:
+        device.gpio_config_json = gpio_config_json
+    if firmware_version is not None:
+        device.firmware_version = firmware_version
+    if relay_enabled is not None:
+        device.relay_enabled = bool(relay_enabled)
     if notes is not None:
         device.notes = notes
     if is_primary is not None:
@@ -118,6 +169,8 @@ def _unchanged(existing: Reading, sample: ReadingSample) -> bool:
         and _same(existing.current, sample.current)
         and _same(existing.power_w, sample.power_w)
         and _same(existing.energy_wh, sample.energy_wh)
+        and (existing.sensor_status or None) == (sample.sensor_status or None)
+        and (existing.measurement_status or None) == (sample.measurement_status or None)
     )
 
 
@@ -160,8 +213,15 @@ def persist_samples(
     samples: list[ReadingSample] | list[dict],
     *,
     source: str | None = None,
+    owner_id: int | None = None,
 ) -> IngestResult:
-    """Store a batch, validating each sample independently."""
+    """Store a batch, validating each sample independently.
+
+    When `owner_id` is supplied, a sample for a device owned by someone else, or for an
+    unclaimed legacy device, is rejected per sample rather than written. A new device id is
+    registered to that owner. With no owner (direct simulator/CLI use), only unowned
+    legacy devices are writable.
+    """
     result = IngestResult(received=len(samples))
 
     prepared: list[tuple[int, ReadingSample]] = []
@@ -177,21 +237,44 @@ def persist_samples(
 
     # One device lookup and one device insert per distinct device, not per sample.
     ordered_ids = list(dict.fromkeys(sample.device_id for _, sample in prepared))
+    blocked: dict[str, str] = {}
     for device_id in ordered_ids:
+        existing = db.get(Device, device_id)
+        if existing is not None:
+            if owner_id is None and existing.owner_id is not None:
+                blocked[device_id] = "device belongs to an account; owner_id is required"
+            elif owner_id is not None and existing.owner_id != owner_id:
+                blocked[device_id] = "device does not belong to this account"
+            continue
         declared = {sample.is_simulated for _, sample in prepared if sample.device_id == device_id}
-        existed = db.get(Device, device_id) is not None
-        ensure_device(
-            db,
-            device_id,
-            source=source,
-            is_simulated=declared.pop() if len(declared) == 1 else None,
-        )
-        if not existed:
-            result.devices_registered.append(device_id)
+        try:
+            ensure_device(
+                db,
+                device_id,
+                owner_id=owner_id,
+                source=source,
+                is_simulated=declared.pop() if len(declared) == 1 else None,
+            )
+        except OwnershipError as exc:
+            blocked[device_id] = str(exc)
+            continue
+        result.devices_registered.append(device_id)
+
+    allowed = [sample for sample in prepared if sample[1].device_id not in blocked]
+    for index, sample in prepared:
+        reason = blocked.get(sample.device_id)
+        if reason:
+            result.rejected += 1
+            result.errors.append({"index": index, "reason": reason})
+    if not allowed:
+        result.devices_touched = []
+        return result
+
+    ordered_ids = [device_id for device_id in ordered_ids if device_id not in blocked]
     result.devices_touched = ordered_ids
 
     # Load the rows this batch would overwrite in one query rather than per sample.
-    pairs = {(sample.device_id, sample.ts) for _, sample in prepared}
+    pairs = {(sample.device_id, sample.ts) for _, sample in allowed}
     existing: dict[tuple[str, datetime], Reading] = {}
     for device_id in ordered_ids:
         for row in db.execute(select(Reading).where(Reading.device_id == device_id)).scalars():
@@ -199,7 +282,7 @@ def persist_samples(
             if key in pairs:
                 existing[key] = row
 
-    for _, sample in prepared:
+    for _, sample in allowed:
         key = (sample.device_id, sample.ts)
         flags = flag_list(sample.quality_flags)
         row = existing.get(key)
@@ -213,6 +296,8 @@ def persist_samples(
             row.energy_wh = sample.energy_wh
             row.source = sample.source
             row.is_simulated = sample.is_simulated
+            row.sensor_status = sample.sensor_status
+            row.measurement_status = sample.measurement_status
             row.quality_flags = flags
             result.updated += 1
         else:
@@ -226,6 +311,8 @@ def persist_samples(
                     energy_wh=sample.energy_wh,
                     source=sample.source,
                     is_simulated=sample.is_simulated,
+                    sensor_status=sample.sensor_status,
+                    measurement_status=sample.measurement_status,
                     quality_flags=flags,
                 )
             )
@@ -242,12 +329,13 @@ def ingest(
     samples: list[ReadingSample] | list[dict],
     *,
     source: str | None = None,
+    owner_id: int | None = None,
     commit: bool = True,
 ) -> IngestResult:
     """Convenience wrapper that owns its own session."""
     db = SessionLocal()
     try:
-        result = persist_samples(db, samples, source=source)
+        result = persist_samples(db, samples, source=source, owner_id=owner_id)
         if commit:
             db.commit()
         return result
@@ -273,26 +361,41 @@ def delete_readings(db: Session, device_id: str) -> int:
 # ---------------------------------------------------------------------------------------
 
 
-def get_device(db: Session, device_id: str) -> Device | None:
-    return db.get(Device, device_id)
+def get_device(db: Session, device_id: str, owner_id: int | None = None) -> Device | None:
+    device = db.get(Device, device_id)
+    if device is None:
+        return None
+    if owner_id is not None and device.owner_id != owner_id:
+        return None
+    return device
 
 
-def device_exists(db: Session, device_id: str) -> bool:
-    return db.get(Device, device_id) is not None
+def device_exists(db: Session, device_id: str, owner_id: int | None = None) -> bool:
+    return get_device(db, device_id, owner_id) is not None
 
 
-def list_devices(db: Session) -> list[Device]:
+def list_devices(db: Session, owner_id: int | None = None) -> list[Device]:
     """Oldest first, so the device that was primary by default stays first."""
+    query = select(Device)
+    if owner_id is not None:
+        query = query.where(Device.owner_id == owner_id)
+    else:
+        query = query.where(Device.owner_id.is_(None))
     return list(
         db.execute(
-            select(Device).order_by(Device.is_primary.desc(), Device.created_at, Device.id)
+            query.order_by(Device.is_primary.desc(), Device.created_at, Device.id)
         ).scalars()
     )
 
 
-def primary_device_id(db: Session) -> str | None:
+def primary_device_id(db: Session, owner_id: int | None = None) -> str | None:
+    query = select(Device.id)
+    if owner_id is not None:
+        query = query.where(Device.owner_id == owner_id)
+    else:
+        query = query.where(Device.owner_id.is_(None))
     row = db.execute(
-        select(Device.id).order_by(Device.is_primary.desc(), Device.created_at, Device.id)
+        query.order_by(Device.is_primary.desc(), Device.created_at, Device.id)
     ).first()
     return row[0] if row else None
 
@@ -334,6 +437,8 @@ def reading_payload(row: Reading) -> dict:
         "derived_power_factor": round(factor, 4) if factor is not None else None,
         "source": row.source,
         "is_simulated": row.is_simulated,
+        "sensor_status": row.sensor_status,
+        "measurement_status": row.measurement_status,
         "quality_flags": row.flag_list(),
     }
 
@@ -358,6 +463,17 @@ def fetch_readings(
 
 def simulated_sources() -> set[str]:
     return set(SIMULATED_SOURCES)
+
+
+def issue_device_token(db: Session, device: Device) -> str:
+    """Issue a new device bearer token. The raw value is returned exactly once."""
+    from backend.app.auth import new_device_token, token_hash
+
+    raw, digest = new_device_token()
+    device.api_token_hash = digest
+    device.api_token_prefix = raw[:12]
+    db.flush()
+    return raw
 
 
 def available_sources() -> list[dict]:
@@ -388,6 +504,7 @@ def _serial_installed() -> bool:
 
 __all__ = [
     "IngestResult",
+    "OwnershipError",
     "ReadingSample",
     "available_sources",
     "delete_readings",
@@ -398,6 +515,7 @@ __all__ = [
     "get_device",
     "ingest",
     "iso",
+    "issue_device_token",
     "list_devices",
     "persist_samples",
     "primary_device_id",

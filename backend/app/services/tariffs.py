@@ -101,20 +101,25 @@ def default_config() -> TariffConfig:
     )
 
 
-def get_active(db: Session) -> Tariff:
-    """The tariff in force, creating the default example on first run.
+def get_active(db: Session, owner_id: int | None = None) -> Tariff:
+    """The tariff in force for one account, creating the default example on first run.
 
     Creating it lazily rather than at migration time means a database that has had its
-    tariffs cleared still answers the billing screen.
+    tariffs cleared still answers the billing screen. The default belongs to the account
+    that first asked for it, never to another account.
     """
-    tariff = db.execute(
-        select(Tariff).where(Tariff.is_active.is_(True)).order_by(Tariff.id)
-    ).scalars().first()
+    query = select(Tariff).where(Tariff.is_active.is_(True))
+    if owner_id is None:
+        query = query.where(Tariff.owner_id.is_(None))
+    else:
+        query = query.where(Tariff.owner_id == owner_id)
+    tariff = db.execute(query.order_by(Tariff.id)).scalars().first()
     if tariff is not None:
         return tariff
 
     config = default_config()
     tariff = Tariff(
+        owner_id=owner_id,
         name=config.name,
         rate_type=config.rate_type,
         currency=config.currency,
@@ -135,12 +140,17 @@ def get_active(db: Session) -> Tariff:
     return tariff
 
 
-def get_config(db: Session) -> TariffConfig:
-    return to_config(get_active(db))
+def get_config(db: Session, owner_id: int | None = None) -> TariffConfig:
+    return to_config(get_active(db, owner_id))
 
 
-def list_tariffs(db: Session) -> list[Tariff]:
-    return list(db.execute(select(Tariff).order_by(Tariff.id.desc())).scalars())
+def list_tariffs(db: Session, owner_id: int | None = None) -> list[Tariff]:
+    query = select(Tariff)
+    if owner_id is None:
+        query = query.where(Tariff.owner_id.is_(None))
+    else:
+        query = query.where(Tariff.owner_id == owner_id)
+    return list(db.execute(query.order_by(Tariff.id.desc())).scalars())
 
 
 def as_dict(tariff: Tariff) -> dict:

@@ -27,6 +27,7 @@ dev = ["pytest>=8.0", "httpx>=0.27"]
 [project.scripts]
 wattxpense-seed = "simulator.cli:seed_main"
 wattxpense-simulate = "simulator.cli:simulate_main"
+wattxpense-admin = "backend.app.cli:main"
 
 [tool.setuptools]
 packages = [

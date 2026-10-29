@@ -171,6 +171,19 @@ class Settings:
     nominal_frequency_hz: float
     voltage_tolerance_percent: float
 
+    # Accounts and sessions. Defaults are safe for local development; set
+    # WATTXPENSE_COOKIE_SECURE=true when the app is served over HTTPS.
+    session_ttl_hours: int
+    cookie_secure: bool
+    registration_enabled: bool
+    login_max_attempts: int
+    login_lockout_minutes: int
+
+    # Hardware safety. Relay control is off for the whole installation by default and has
+    # to be switched on explicitly; even then each device has its own opt-in flag. There
+    # is deliberately no automatic switching path.
+    relay_control_enabled: bool
+
     cors_origins: list[str] = field(default_factory=list)
 
     @property
@@ -220,6 +233,12 @@ def get_settings() -> Settings:
         nominal_voltage_v=_env_float("WATTXPENSE_NOMINAL_VOLTAGE_V", 230.0),
         nominal_frequency_hz=_env_float("WATTXPENSE_NOMINAL_FREQUENCY_HZ", 50.0),
         voltage_tolerance_percent=_env_float("WATTXPENSE_VOLTAGE_TOLERANCE_PERCENT", 10.0),
+        session_ttl_hours=_env_int("WATTXPENSE_SESSION_TTL_HOURS", 24 * 7),
+        cookie_secure=_env_bool("WATTXPENSE_COOKIE_SECURE", False),
+        registration_enabled=_env_bool("WATTXPENSE_REGISTRATION_ENABLED", True),
+        login_max_attempts=_env_int("WATTXPENSE_LOGIN_MAX_ATTEMPTS", 5),
+        login_lockout_minutes=_env_int("WATTXPENSE_LOGIN_LOCKOUT_MINUTES", 15),
+        relay_control_enabled=_env_bool("WATTXPENSE_RELAY_CONTROL_ENABLED", False),
         cors_origins=_env_list("WATTXPENSE_CORS_ORIGINS", DEFAULT_CORS_ORIGINS),
     )
 

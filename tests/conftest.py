@@ -14,20 +14,83 @@ os.environ["WATTXPENSE_DATABASE_URL"] = f"sqlite:///{Path(_TMP_DIR) / 'test.db'}
 os.environ["WATTXPENSE_TIMEZONE"] = "UTC"
 # Pin "now" so day boundaries, billing periods and forecasts are deterministic.
 os.environ["WATTXPENSE_SIMULATED_NOW"] = "2026-09-26T05:00:00Z"
+# Relay control is off by default in a real install. The hardware tests exercise the
+# explicit opt-in path, so enable the install-wide switch for the test process only.
+os.environ["WATTXPENSE_RELAY_CONTROL_ENABLED"] = "true"
 
 from fastapi.testclient import TestClient  # noqa: E402
 
+from backend.app.auth import reset_rate_limits  # noqa: E402
 from backend.app.database import Base, engine  # noqa: E402
 from backend.app.main import app  # noqa: E402
+
+TEST_EMAIL = "owner@example.test"
+TEST_PASSWORD = "correct horse battery staple"
+
+
+def register_and_login(client: TestClient, email: str = TEST_EMAIL, password: str = TEST_PASSWORD) -> dict:
+    """Create an account and install its CSRF header on the test client."""
+    response = client.post(
+        "/api/auth/register",
+        json={"email": email, "password": password, "display_name": "Test owner"},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    client.headers.update({"X-CSRF-Token": body["csrf_token"]})
+    return body
+
+
+def login(client: TestClient, email: str = TEST_EMAIL, password: str = TEST_PASSWORD) -> dict:
+    response = client.post("/api/auth/login", json={"email": email, "password": password})
+    assert response.status_code == 200, response.text
+    body = response.json()
+    client.headers.update({"X-CSRF-Token": body["csrf_token"]})
+    return body
+
+
+def _new_client() -> TestClient:
+    Base.metadata.create_all(bind=engine)
+    reset_rate_limits()
+    return TestClient(app)
+
+
+@pytest.fixture()
+def anon_client():
+    """A TestClient on an empty database with no signed-in account."""
+    client = _new_client()
+    try:
+        yield client
+    finally:
+        client.close()
+        Base.metadata.drop_all(bind=engine)
 
 
 @pytest.fixture()
 def client():
-    """TestClient on an empty database. Recreated per test so tests cannot leak state into each other."""
-    Base.metadata.create_all(bind=engine)
-    with TestClient(app) as test_client:
-        yield test_client
-    Base.metadata.drop_all(bind=engine)
+    """An authenticated TestClient on an empty database.
+
+    Recreated per test so tests cannot leak state into each other. The default account is
+    deliberately separate from the data: tests that want a second user create one through
+    the registration endpoint.
+    """
+    client = _new_client()
+    try:
+        register_and_login(client)
+        yield client
+    finally:
+        client.close()
+        Base.metadata.drop_all(bind=engine)
+
+
+@pytest.fixture()
+def second_client():
+    """A second, independent account on the same database. Used for isolation tests."""
+    client = _new_client()
+    try:
+        register_and_login(client, "second@example.test", "second correct horse battery")
+        yield client
+    finally:
+        client.close()
 
 
 @pytest.fixture()

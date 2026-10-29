@@ -52,12 +52,17 @@ def _aware(value: datetime) -> datetime:
     return value
 
 
-def pick_device(db: Session, device_id: str | None = None) -> Device | None:
+def pick_device(db: Session, device_id: str | None = None, owner_id: int | None = None) -> Device | None:
+    query = select(Device)
+    if owner_id is not None:
+        query = query.where(Device.owner_id == owner_id)
+    else:
+        query = query.where(Device.owner_id.is_(None))
     if device_id:
-        return db.get(Device, device_id)
+        return db.execute(query.where(Device.id == device_id)).scalars().first()
     return db.execute(
-        select(Device).where(Device.is_primary.is_(True)).order_by(Device.id)
-    ).scalars().first() or db.execute(select(Device).order_by(Device.id)).scalars().first()
+        query.where(Device.is_primary.is_(True)).order_by(Device.id)
+    ).scalars().first() or db.execute(query.order_by(Device.id)).scalars().first()
 
 
 def load_records(
@@ -154,11 +159,11 @@ def _coverage_note(range_days: int, previous_coverage: float, change: float | No
     return f"Compared with the previous {range_days} days, which are {previous_coverage * 100:.0f}% covered."
 
 
-def usage(db: Session, *, view: str = DEFAULT_VIEW, device_id: str | None = None) -> dict:
+def usage(db: Session, *, view: str = DEFAULT_VIEW, device_id: str | None = None, owner_id: int | None = None) -> dict:
     view = (view or DEFAULT_VIEW).strip().lower()
     days = _range_days(view)
 
-    device = pick_device(db, device_id)
+    device = pick_device(db, device_id, owner_id)
     if device is None:
         return _empty_usage()
 
@@ -489,13 +494,13 @@ def _period_daily(db: Session, device: Device, start: date, end: date, config: t
     return frame, daily
 
 
-def summary(db: Session, *, device_id: str | None = None) -> dict:
-    device = pick_device(db, device_id)
+def summary(db: Session, *, device_id: str | None = None, owner_id: int | None = None) -> dict:
+    device = pick_device(db, device_id, owner_id)
     if device is None:
         return {**NO_DEVICE, "generated_at": iso(utc_now())}
 
     settings = get_settings()
-    config = tariffs.get_config(db)
+    config = tariffs.get_config(db, owner_id)
     tzinfo = get_tz()
     today = local_now().date()
 
@@ -519,7 +524,15 @@ def summary(db: Session, *, device_id: str | None = None) -> dict:
     metered_kwh, metered_days, skipped_days, skipped_kwh = _metered_period(daily, today)
     today_day_cost = billing.marginal_day_cost(config, metered_kwh, today_kwh)
 
-    forecast_daily = _run_forecast(daily, horizon_days=max((period_end - today).days + 1, 1), today=today)
+    forecast_daily = _run_forecast(
+        daily,
+        horizon_days=max((period_end - today).days + 1, 1),
+        today=today,
+        # The projection covers today through the period end, even when today is already
+        # complete enough to be a training day. Without this anchor the forecast can start
+        # tomorrow and run past the period end, silently omitting today.
+        start_date=today,
+    )
     projected = _projected_bill(
         config=config,
         daily=daily,
@@ -583,7 +596,7 @@ def summary(db: Session, *, device_id: str | None = None) -> dict:
             "is_estimate": False,
         },
         "projected_bill": projected,
-        "tariff": tariffs.as_dict(tariffs.get_active(db)),
+        "tariff": tariffs.as_dict(tariffs.get_active(db, owner_id)),
         "meta": {"honesty": HONESTY_STATEMENT},
     }
 
@@ -619,12 +632,32 @@ def _metered_period(daily: pd.DataFrame, today: date) -> tuple[float, int, list[
     return round(total, 3), counted, skipped, round(skipped_kwh, 3)
 
 
-def _run_forecast(daily: pd.DataFrame, *, horizon_days: int, today: date):
+def _run_forecast(
+    daily: pd.DataFrame,
+    *,
+    horizon_days: int,
+    today: date,
+    start_date: date | None = None,
+):
+    """Forecast daily energy, optionally anchored to a specific first day.
+
+    When `start_date` is supplied the history is cut off before that day, so a projection
+    that starts today cannot learn from today's own readings. That keeps the first forecast
+    day aligned with the billing period instead of starting after the last complete day.
+    """
+    history = daily
+    if start_date is not None and daily is not None and not daily.empty:
+        cutoff = pd.Timestamp(start_date)
+        if daily.index.tz is not None:
+            cutoff = cutoff.tz_localize(daily.index.tz)
+        history = daily.loc[daily.index < cutoff]
+
     return forecast_energy(
-        daily,
+        history,
         horizon_days=horizon_days,
         today=today,
         min_coverage=COMPLETE_DAY_COVERAGE,
+        start_date=start_date,
     )
 
 
@@ -724,6 +757,8 @@ def _projected_bill(
             "confidence": forecast.confidence,
             "confidence_reason": forecast.confidence_reason,
             "days_forecast": forecast_days if covers_today else 0,
+            "first_day_forecast": forecast.first_day_forecast if covers_today else "",
+            "last_day_forecast": forecast.last_day_forecast if covers_today else "",
         },
         "forecast_covers_today": covers_today,
         "projection_basis": basis,
@@ -755,11 +790,13 @@ def _analysis_frame(db: Session, device: Device, config: tariffs.TariffConfig, d
     return frame, daily, today
 
 
-def forecast_panel(db: Session, *, horizon_days: int = 7, device_id: str | None = None) -> dict:
-    device = pick_device(db, device_id)
+def forecast_panel(
+    db: Session, *, horizon_days: int = 7, device_id: str | None = None, owner_id: int | None = None
+) -> dict:
+    device = pick_device(db, device_id, owner_id)
     if device is None:
         return {**NO_DEVICE, "is_estimate": True}
-    config = tariffs.get_config(db)
+    config = tariffs.get_config(db, owner_id)
     _, daily, today = _analysis_frame(db, device, config)
     result = _run_forecast(daily, horizon_days=horizon_days, today=today)
     payload = result.as_dict()
@@ -767,12 +804,12 @@ def forecast_panel(db: Session, *, horizon_days: int = 7, device_id: str | None 
     return payload
 
 
-def anomalies_panel(db: Session, *, device_id: str | None = None) -> dict:
-    device = pick_device(db, device_id)
+def anomalies_panel(db: Session, *, device_id: str | None = None, owner_id: int | None = None) -> dict:
+    device = pick_device(db, device_id, owner_id)
     if device is None:
         return {**NO_DEVICE, "is_estimate": True}
     settings = get_settings()
-    config = tariffs.get_config(db)
+    config = tariffs.get_config(db, owner_id)
     frame, daily, _ = _analysis_frame(db, device, config)
     report = build_report(
         daily,
@@ -785,11 +822,11 @@ def anomalies_panel(db: Session, *, device_id: str | None = None) -> dict:
     return payload
 
 
-def insights_panel(db: Session, *, device_id: str | None = None) -> dict:
-    device = pick_device(db, device_id)
+def insights_panel(db: Session, *, device_id: str | None = None, owner_id: int | None = None) -> dict:
+    device = pick_device(db, device_id, owner_id)
     if device is None:
         return {**NO_DEVICE, "is_estimate": True}
-    config = tariffs.get_config(db)
+    config = tariffs.get_config(db, owner_id)
     frame, daily, _ = _analysis_frame(db, device, config)
 
     period_start, period_end = billing.period_bounds(local_now().date(), config.billing_start_day)

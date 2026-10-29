@@ -172,6 +172,26 @@ class TestForecast:
         assert bill["forecast_covers_today"] is True
         assert "twice" in bill["projection_basis"]
 
+    def test_projection_forecast_stays_inside_the_billing_period(self, client, monkeypatch):
+        """A complete today must not push the forecast into the next billing period.
+
+        Late in the day today can reach the 90% coverage needed to be a training day. The
+        forecast used to start the day after the last complete day, which then omitted today
+        and ran one day past the period end while still claiming to cover today.
+        """
+        from tests.conftest import set_now
+
+        set_now(monkeypatch, "2026-09-26T23:00:00Z")
+        set_tariff(client)
+        post_readings(client, build_readings("d1", "2026-09-19T00:00:00Z", days=7, watts=1000.0))
+        post_readings(client, build_readings("d1", "2026-09-26T00:00:00Z", hours=23, watts=1000.0))
+
+        bill = client.get("/api/analytics/summary").json()["projected_bill"]
+        assert bill["forecast_covers_today"] is True
+        assert bill["forecast"]["first_day_forecast"] == "2026-09-26"
+        assert bill["forecast"]["last_day_forecast"] == "2026-09-30"
+        assert bill["forecast"]["days_forecast"] == 5
+
     def test_a_better_pattern_yields_a_better_score(self, client):
         """A strong weekday/weekend signal should beat the lag-7 baseline, proving the model works."""
         metrics = client.get("/api/ai/forecast?horizon_days=7").json()["metrics"]

@@ -17,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 
 from backend.app.config import get_settings
 from backend.app.database import init_db
-from backend.app.routers import ai, analytics, billing, core
+from backend.app.routers import ai, analytics, auth, billing, core
 
 VERSION = "1.0.0"
 
@@ -46,11 +46,20 @@ def create_app() -> FastAPI:
         app.add_middleware(
             CORSMiddleware,
             allow_origins=settings.cors_origins,
-            allow_credentials=False,
+            allow_credentials=True,
             allow_methods=["*"],
             allow_headers=["*"],
         )
 
+    @app.middleware("http")
+    async def security_headers(request, call_next):
+        response = await call_next(request)
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("Referrer-Policy", "same-origin")
+        return response
+
+    app.include_router(auth.router)
     app.include_router(core.router)
     app.include_router(analytics.router)
     app.include_router(billing.router)

@@ -135,9 +135,11 @@ def _generated_text(payload: dict) -> str:
     return "\n".join(part for part in parts if part)
 
 
-def explain(db: Session, *, device_id: str | None = None, horizon_days: int = 7) -> dict:
+def explain(
+    db: Session, *, device_id: str | None = None, horizon_days: int = 7, owner_id: int | None = None
+) -> dict:
     """A written explanation of the current figures, plus the figures it was built from."""
-    device = analytics.pick_device(db, device_id)
+    device = analytics.pick_device(db, device_id, owner_id)
     if device is None:
         return {
             "status": "no_data",
@@ -149,10 +151,10 @@ def explain(db: Session, *, device_id: str | None = None, horizon_days: int = 7)
             "message": NO_DATA_MESSAGE,
         }
 
-    summary = analytics.summary(db, device_id=device.id)
-    insights = analytics.insights_panel(db, device_id=device.id)
-    forecast = analytics.forecast_panel(db, horizon_days=horizon_days, device_id=device.id)
-    anomalies = analytics.anomalies_panel(db, device_id=device.id)
+    summary = analytics.summary(db, device_id=device.id, owner_id=owner_id)
+    insights = analytics.insights_panel(db, device_id=device.id, owner_id=owner_id)
+    forecast = analytics.forecast_panel(db, horizon_days=horizon_days, device_id=device.id, owner_id=owner_id)
+    anomalies = analytics.anomalies_panel(db, device_id=device.id, owner_id=owner_id)
 
     context = build_context(
         summary=summary,

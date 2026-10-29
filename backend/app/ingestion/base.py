@@ -47,6 +47,8 @@ class ReadingSample:
     energy_wh: float | None = None
     source: str | None = None
     is_simulated: bool | None = None
+    sensor_status: str | None = None
+    measurement_status: str | None = None
     quality_flags: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict:
@@ -61,6 +63,8 @@ class ReadingSample:
             "energy_wh": self.energy_wh,
             "source": self.source,
             "is_simulated": self.is_simulated,
+            "sensor_status": self.sensor_status,
+            "measurement_status": self.measurement_status,
         }
 
 
@@ -192,6 +196,10 @@ def normalize_sample(payload: Any, source: str | None = None) -> ReadingSample:
             energy_wh=_number(data.get("energy_wh"), "energy_wh"),
             source=(str(declared_source) if declared_source is not None else None),
             is_simulated=simulated_for(declared_source, declared_simulated),
+            sensor_status=(str(data.get("sensor_status")).strip() if data.get("sensor_status") else None),
+            measurement_status=(
+                str(data.get("measurement_status")).strip() if data.get("measurement_status") else None
+            ),
         )
 
     # Impossibilities are rejected outright: they cannot be a real measurement, and
@@ -214,5 +222,21 @@ def normalize_sample(payload: Any, source: str | None = None) -> ReadingSample:
     if sample.power_w is None and sample.energy_wh is None:
         raise SampleRejected("a reading needs at least one of power_w or energy_wh")
 
+    # Keep flags an adapter already attached (for example "power was derived from V x I")
+    # and add the checks that apply to every sample. Re-normalising a ReadingSample must
+    # not silently drop the provenance notes added upstream.
+    existing_flags = list(sample.quality_flags)
     sample.quality_flags = quality_flags(sample)
+    for flag in existing_flags:
+        if flag not in sample.quality_flags:
+            sample.quality_flags.append(flag)
+    if sample.sensor_status and sample.sensor_status.strip().lower() not in {"ok", "healthy", "nominal", "good"}:
+        sample.quality_flags.append(f"sensor reports status '{sample.sensor_status}'")
+    if sample.measurement_status and sample.measurement_status.strip().lower() not in {
+        "ok",
+        "valid",
+        "measured",
+        "nominal",
+    }:
+        sample.quality_flags.append(f"measurement status is '{sample.measurement_status}'")
     return sample

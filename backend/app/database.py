@@ -17,7 +17,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from backend.app.config import get_settings
-from backend.app.models import Base, Device, Reading, Tariff  # noqa: F401  (re-exported)
+from backend.app.models import AuthSession, Base, Device, Reading, Tariff, User  # noqa: F401  (re-exported)
 
 _settings = get_settings()
 
