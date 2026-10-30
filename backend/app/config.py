@@ -140,6 +140,28 @@ def _env_list(name: str, default: tuple[str, ...]) -> list[str]:
     return [item.strip() for item in raw.split(",") if item.strip()]
 
 
+def normalize_database_url(url: str) -> str:
+    """Point a bare Postgres URL at the DBAPI this project actually ships.
+
+    SQLAlchemy 2.1 resolves a plain ``postgresql://`` URL to the psycopg 3
+    dialect, which imports ``psycopg``. The runtime image installs
+    ``psycopg2-binary`` instead, so a bare Supabase connection string would fail
+    at import time with ``ModuleNotFoundError: No module named 'psycopg'``.
+
+    Rewriting the scheme here means operators can paste the URL Supabase gives
+    them without having to know about SQLAlchemy driver suffixes. URLs that
+    already name a driver are returned untouched.
+    """
+    if not url:
+        return url
+    url = url.strip()
+    if url.startswith("postgres://"):
+        return "postgresql+psycopg2://" + url[len("postgres://") :]
+    if url.startswith("postgresql://"):
+        return "postgresql+psycopg2://" + url[len("postgresql://") :]
+    return url
+
+
 DEFAULT_CORS_ORIGINS = (
     "http://localhost:5173",
     "http://127.0.0.1:5173",
@@ -210,7 +232,9 @@ class Settings:
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     data_dir = Path(os.environ.get("WATTXPENSE_DATA_DIR", "./data")).expanduser()
-    database_url = os.environ.get("WATTXPENSE_DATABASE_URL") or f"sqlite:///{data_dir / 'wattxpense.db'}"
+    database_url = normalize_database_url(
+        os.environ.get("WATTXPENSE_DATABASE_URL") or f"sqlite:///{data_dir / 'wattxpense.db'}"
+    )
 
     timezone_name = (os.environ.get("WATTXPENSE_TIMEZONE") or "Asia/Kolkata").strip() or "Asia/Kolkata"
 

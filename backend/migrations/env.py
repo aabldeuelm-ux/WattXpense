@@ -17,6 +17,7 @@ if config.config_file_name is not None:
 
 # add the model's metadata to the target metadata so that 'autogenerate' can detect
 # added table columns/changes
+from backend.app.config import normalize_database_url
 from backend.app.models import Base
 target_metadata = Base.metadata
 
@@ -36,6 +37,7 @@ def run_migrations_offline() -> None:
     if not url:
         print("ERROR: WATTXPENSE_DATABASE_URL environment variable not set.")
         sys.exit(1)
+    url = normalize_database_url(url)
     context.configure(
         url=url,
         target_metadata=target_metadata,
@@ -56,6 +58,7 @@ def run_migrations_online() -> None:
     if not url:
         print("ERROR: WATTXPENSE_DATABASE_URL environment variable not set.")
         sys.exit(1)
+    url = normalize_database_url(url)
 
     connectable = engine_from_config(
         {"sqlalchemy": {"url": url}},

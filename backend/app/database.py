@@ -19,7 +19,7 @@ from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from backend.app.config import get_settings
+from backend.app.config import get_settings, normalize_database_url
 from backend.app.models import Base  # noqa: F401  (re-exported for init_db)
 
 _settings = get_settings()
@@ -32,10 +32,12 @@ _settings = get_settings()
 #   test database is used (as conftest.py already does).
 # ----------------------------------------------------------------------
 
-_DATABASE_URL = os.environ.get(
-    "WATTXPENSE_DATABASE_URL",
-    # Default for local dev: an in-memory SQLite used by tests only.
-    "sqlite:///:memory:",
+_DATABASE_URL = normalize_database_url(
+    os.environ.get(
+        "WATTXPENSE_DATABASE_URL",
+        # Default for local dev: an in-memory SQLite used by tests only.
+        "sqlite:///:memory:",
+    )
 )
 
 # If the URL is empty or explicitly "none", force sqlite in-memory so the app
