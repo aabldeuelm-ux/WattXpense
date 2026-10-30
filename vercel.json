@@ -15,9 +15,9 @@
       ]
     },
     "backend": {
-      "root": "backend",
+      "root": ".",
       "framework": "fastapi",
-      "buildCommand": "uv pip install -e ."
+      "entrypoint": "backend.app.main:app"
     }
   },
   "rewrites": [
